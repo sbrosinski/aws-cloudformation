@@ -1,0 +1,195 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Code Deploy pipeline for hugo static site generator
+Parameters:
+  GithubOauthToken:
+    Type: String
+  GithubRepoOwner:
+    Type: String
+  GithubRepoName:
+    Type: String
+  GithubRepoBranch:
+    Type: String
+    Default: master
+  DomainName:
+    Type: String
+    Description: APEX Domain name. Aliases for www.DomainName will be created as well
+  DeploymentStage:
+    Type: String
+    Default: prod
+  SSLCertARN:
+    Type: String
+    Default: arn:aws:acm:us-east-1:920621615401:certificate/fefa982a-ed47-4ba6-bc35-b8113751d30d
+    Description: SSL cert for this domain in us-east-1, needs to be in that region for cloudfront
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Source Code Repository
+        Parameters:
+          - GithubRepoOwner
+          - GithubRepoName
+          - GithubRepoBranch
+          - GithubOauthToken
+Resources:
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: PublicRead
+      WebsiteConfiguration:
+        IndexDocument: index.html
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal: "*"
+          Action: s3:GetObject
+          Resource: !Sub arn:aws:s3:::${WebsiteBucket}/*
+  ArtifactStoreBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      AccessControl: BucketOwnerFullControl
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt [PipelineRole, Arn]
+      ArtifactStore:
+        Location:
+          Ref:
+            ArtifactStoreBucket
+        Type: S3
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              InputArtifacts: []
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                Owner: !Ref GithubRepoOwner
+                Repo: !Ref GithubRepoName
+                Branch: !Ref GithubRepoBranch
+                OAuthToken: !Ref GithubOauthToken
+              RunOrder: 1
+        - Name: DeployWebsite
+          Actions:
+          - Name: DeployWebsiteAction
+            ActionTypeId:
+              Category: Build
+              Owner: AWS
+              Version: 1
+              Provider: CodeBuild
+            InputArtifacts:
+              - Name: SourceOutput
+            OutputArtifacts:
+              - Name: DeployWebsiteActionOutput
+            Configuration:
+              ProjectName:
+                Ref: DeployWebsiteBuild
+            RunOrder: 2
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codepipeline.amazonaws.com
+          Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  DeployWebsiteBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/ubuntu-base:14.04
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: WEBSITE_BUCKET
+            Value: !Ref WebsiteBucket
+      Name: !Sub DeployWebsiteBuild-${DeploymentStage}
+      ServiceRole: !Ref DeployWebsiteRole
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.1
+          phases:
+            build:
+              commands:
+                - chmod u+x bin/hugo_0.17_linux_amd64 && ./bin/hugo_0.17_linux_amd64
+            post_build:
+              commands:
+                - aws s3 sync public/ s3://$WEBSITE_BUCKET/
+
+  DeployWebsiteRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  WebsiteCdn:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Aliases:
+         - !Sub www.${DomainName}
+         - !Ref DomainName
+        PriceClass: PriceClass_100
+        Origins:
+          - DomainName: !Sub ${WebsiteBucket}.s3-website-${AWS::Region}.amazonaws.com
+            Id: Origin
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+        DefaultCacheBehavior:
+          Compress: true
+          DefaultTTL: 300
+          ForwardedValues:
+            QueryString: false
+          TargetOriginId: Origin
+          ViewerProtocolPolicy: redirect-to-https
+        Enabled: true
+        ViewerCertificate:
+          AcmCertificateArn: !Ref SSLCertARN
+          SslSupportMethod: sni-only
+        HttpVersion: http2
+
+  DNS:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Sub ${DomainName}.
+      RecordSets:
+      - Name: !Ref DomainName
+        Type: A
+        AliasTarget:
+          # Magic AWS number:  For CloudFront, use Z2FDTNDATAQYW2.
+          HostedZoneId: Z2FDTNDATAQYW2
+          DNSName: !GetAtt [WebsiteCdn, DomainName]
+      - Name: !Sub www.${DomainName}
+        Type: CNAME
+        TTL: 900
+        ResourceRecords:
+          - !GetAtt [WebsiteCdn, DomainName]
