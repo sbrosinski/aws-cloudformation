@@ -30,6 +30,10 @@ Metadata:
           - GithubRepoName
           - GithubRepoBranch
           - GithubOauthToken
+      - Label:
+          default: SSL Cert ARN in us-east-1
+        Parameters:
+          - SSLCertArn
 Resources:
   WebsiteBucket:
     Type: AWS::S3::Bucket
