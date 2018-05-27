@@ -137,7 +137,7 @@ Resources:
           phases:
             build:
               commands:
-                - chmod u+x bin/hugo_0.17_linux_amd64 && ./bin/hugo_0.17_linux_amd64
+                - chmod u+x bin/hugo_0.41_linux_amd64 && ./bin/hugo_0.41_linux_amd64
             post_build:
               commands:
                 - aws s3 sync public/ s3://$WEBSITE_BUCKET/
